@@ -266,15 +266,14 @@ export namespace SessionPrompt {
     SessionStatus.set(sessionID, { type: "idle" })
 
     // 递归取消所有子会话
-    cancelChildSessions(sessionID)
+    void cancelChildSessions(sessionID)
     return
   }
 
   // 递归取消所有子会话
   async function cancelChildSessions(parentSessionID: string) {
     try {
-      const sessions = await Session.list()
-      for (const session of sessions) {
+      for await (const session of Session.list()) {
         if (session.parentID === parentSessionID) {
           log.info("canceling child session", { parentID: parentSessionID, childID: session.id })
           cancel(session.id)

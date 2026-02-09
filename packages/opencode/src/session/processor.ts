@@ -360,7 +360,29 @@ export namespace SessionProcessor {
               stack: JSON.stringify(e.stack),
             })
             const error = MessageV2.fromError(e, { providerID: input.model.providerID })
+            // Handle context window exceeded error by triggering compaction
             if (MessageV2.ContextOverflowError.isInstance(error)) {
+              log.info("context window exceeded, triggering compaction", {
+                sessionID: input.sessionID,
+              })
+              // Notify user about the compaction (visible in UI)
+              await Session.updatePart({
+                id: Identifier.ascending("part"),
+                messageID: input.assistantMessage.id,
+                sessionID: input.sessionID,
+                type: "text",
+                text: "⚠️ 上下文窗口已满，正在自动压缩对话历史...\n(Context window exceeded, auto-compacting conversation history...)",
+                time: {
+                  start: Date.now(),
+                  end: Date.now(),
+                },
+              })
+              Bus.publish(MessageV2.Event.Updated, {
+                info: input.assistantMessage,
+              })
+              SessionStatus.set(input.sessionID, {
+                type: "busy",
+              })
               needsCompaction = true
               Bus.publish(Session.Event.Error, {
                 sessionID: input.sessionID,
