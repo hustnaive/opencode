@@ -198,6 +198,8 @@ export namespace SessionProcessor {
 
                     delete toolcalls[value.toolCallId]
                   }
+                  // 工具执行完成后立即检查 abort，确保能及时响应中断
+                  input.abort.throwIfAborted()
                   break
                 }
 
@@ -225,6 +227,8 @@ export namespace SessionProcessor {
                     }
                     delete toolcalls[value.toolCallId]
                   }
+                  // 工具执行错误后也检查 abort
+                  input.abort.throwIfAborted()
                   break
                 }
                 case "error":

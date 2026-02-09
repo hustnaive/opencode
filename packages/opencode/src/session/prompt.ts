@@ -264,7 +264,25 @@ export namespace SessionPrompt {
     match.abort.abort()
     delete s[sessionID]
     SessionStatus.set(sessionID, { type: "idle" })
+
+    // 递归取消所有子会话
+    cancelChildSessions(sessionID)
     return
+  }
+
+  // 递归取消所有子会话
+  async function cancelChildSessions(parentSessionID: string) {
+    try {
+      const sessions = await Session.list()
+      for (const session of sessions) {
+        if (session.parentID === parentSessionID) {
+          log.info("canceling child session", { parentID: parentSessionID, childID: session.id })
+          cancel(session.id)
+        }
+      }
+    } catch (e) {
+      log.error("error canceling child sessions", { error: e })
+    }
   }
 
   export const LoopInput = z.object({
@@ -522,6 +540,11 @@ export namespace SessionPrompt {
           } satisfies MessageV2.TextPart)
         }
 
+        // 子任务执行完成后立即检查 abort，确保能及时退出
+        if (abort.aborted) {
+          log.info("abort detected after subtask execution", { sessionID })
+          break
+        }
         continue
       }
 
@@ -710,6 +733,11 @@ export namespace SessionPrompt {
           auto: true,
           overflow: !processor.message.finish,
         })
+      }
+      // AI 调用完成后检查 abort，确保不再进入下一轮循环
+      if (abort.aborted) {
+        log.info("abort detected after processor.process", { sessionID })
+        break
       }
       continue
     }

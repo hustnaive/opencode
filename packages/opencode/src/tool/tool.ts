@@ -55,6 +55,9 @@ export namespace Tool {
         const toolInfo = init instanceof Function ? await init(initCtx) : init
         const execute = toolInfo.execute
         toolInfo.execute = async (args, ctx) => {
+          // 在工具执行前检查 abort 信号，阻止新工具启动
+          ctx.abort.throwIfAborted()
+
           try {
             toolInfo.parameters.parse(args)
           } catch (error) {
