@@ -308,11 +308,47 @@ export namespace SessionPrompt {
 
     let step = 0
     const session = await Session.get(sessionID)
+
+    // Incremental message loading cache to avoid O(n²) re-reads
+    let _msgCache: MessageV2.WithParts[] | null = null
+    let _lastMsgTime = 0
+    let _invalidateCache = false
+
     while (true) {
       SessionStatus.set(sessionID, { type: "busy" })
       log.info("loop", { step, sessionID })
       if (abort.aborted) break
-      let msgs = await MessageV2.filterCompacted(MessageV2.stream(sessionID))
+
+      if (_msgCache === null || _invalidateCache) {
+        // First iteration or after compaction: full load from DB
+        _msgCache = await MessageV2.filterCompacted(MessageV2.stream(sessionID))
+        _invalidateCache = false
+      } else {
+        // Incremental: load only messages created after the last known timestamp
+        const newMsgs = await MessageV2.loadSince(sessionID, _lastMsgTime)
+        if (newMsgs.length > 0) {
+          const existingIds = new Set(_msgCache.map((m) => m.info.id))
+          for (const msg of newMsgs) {
+            if (!existingIds.has(msg.info.id)) {
+              _msgCache.push(msg)
+            } else {
+              // Message exists but may have updated parts (e.g. tool results added)
+              const idx = _msgCache.findIndex((m) => m.info.id === msg.info.id)
+              if (idx >= 0) _msgCache[idx] = msg
+            }
+          }
+        }
+      }
+      // Update last known timestamp for next incremental load
+      if (_msgCache.length > 0) {
+        _lastMsgTime = Math.max(..._msgCache.map((m) => m.info.time.created))
+      }
+      // Create working copy: insertReminders and text wrapping mutate parts in place,
+      // so we shallow-copy parts arrays to keep the cache clean
+      let msgs = _msgCache.map((m) => ({
+        info: m.info,
+        parts: m.parts.map((p) => ({ ...p })),
+      }))
 
       let lastUser: MessageV2.User | undefined
       let lastAssistant: MessageV2.Assistant | undefined
@@ -558,6 +594,7 @@ export namespace SessionPrompt {
           overflow: task.overflow,
         })
         if (result === "stop") break
+        _invalidateCache = true
         continue
       }
 
@@ -573,6 +610,7 @@ export namespace SessionPrompt {
           model: lastUser.model,
           auto: true,
         })
+        _invalidateCache = true
         continue
       }
 
