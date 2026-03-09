@@ -314,6 +314,9 @@ export namespace SessionPrompt {
     let _lastMsgTime = 0
     let _invalidateCache = false
 
+    // Cache ToolRegistry.tools() results across loop iterations to avoid repeated init() calls
+    const _toolRegistryCache = new Map<string, Awaited<ReturnType<typeof ToolRegistry.tools>>>()
+
     while (true) {
       SessionStatus.set(sessionID, { type: "busy" })
       log.info("loop", { step, sessionID })
@@ -668,6 +671,7 @@ export namespace SessionPrompt {
         processor,
         bypassAgentCheck,
         messages: msgs,
+        toolRegistryCache: _toolRegistryCache,
       })
 
       // Inject StructuredOutput tool if JSON schema mode enabled
@@ -806,6 +810,7 @@ export namespace SessionPrompt {
     processor: SessionProcessor.Info
     bypassAgentCheck: boolean
     messages: MessageV2.WithParts[]
+    toolRegistryCache?: Map<string, Awaited<ReturnType<typeof ToolRegistry.tools>>>
   }) {
     using _ = log.time("resolveTools")
     const tools: Record<string, AITool> = {}
@@ -845,10 +850,20 @@ export namespace SessionPrompt {
       },
     })
 
-    for (const item of await ToolRegistry.tools(
-      { modelID: input.model.api.id, providerID: input.model.providerID },
-      input.agent,
-    )) {
+    // Cache ToolRegistry.tools() to avoid repeated init() + Plugin.trigger("tool.definition") each step
+    const cacheKey = `${input.agent.name}|${input.model.providerID}|${input.model.api.id}`
+    let registryTools: Awaited<ReturnType<typeof ToolRegistry.tools>>
+    if (input.toolRegistryCache?.has(cacheKey)) {
+      registryTools = input.toolRegistryCache.get(cacheKey)!
+    } else {
+      registryTools = await ToolRegistry.tools(
+        { modelID: input.model.api.id, providerID: input.model.providerID },
+        input.agent,
+      )
+      input.toolRegistryCache?.set(cacheKey, registryTools)
+    }
+
+    for (const item of registryTools) {
       const schema = ProviderTransform.schema(input.model, z.toJSONSchema(item.parameters))
       tools[item.id] = tool({
         id: item.id as any,
