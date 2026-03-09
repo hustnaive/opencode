@@ -11,6 +11,9 @@ import { defer } from "@/util/defer"
 import { Config } from "../config/config"
 import { PermissionNext } from "@/permission/next"
 
+// Cache TaskTool description per caller agent to avoid repeated Agent.list() + PermissionNext.evaluate() on every resolveTools call
+const descriptionCache = new Map<string, string>()
+
 const parameters = z.object({
   description: z.string().describe("A short (3-5 words) description of the task"),
   prompt: z.string().describe("The task for the agent to perform"),
@@ -25,20 +28,22 @@ const parameters = z.object({
 })
 
 export const TaskTool = Tool.define("task", async (ctx) => {
-  const agents = await Agent.list().then((x) => x.filter((a) => a.mode !== "primary"))
-
-  // Filter agents by permissions if agent provided
-  const caller = ctx?.agent
-  const accessibleAgents = caller
-    ? agents.filter((a) => PermissionNext.evaluate("task", a.name, caller.permission).action !== "deny")
-    : agents
-
-  const description = DESCRIPTION.replace(
-    "{agents}",
-    accessibleAgents
-      .map((a) => `- ${a.name}: ${a.description ?? "This subagent should only be called manually by the user."}`)
-      .join("\n"),
-  )
+  const cacheKey = ctx?.agent?.name ?? "__no_agent__"
+  let description = descriptionCache.get(cacheKey)
+  if (!description) {
+    const agents = await Agent.list().then((x) => x.filter((a) => a.mode !== "primary"))
+    const caller = ctx?.agent
+    const accessibleAgents = caller
+      ? agents.filter((a) => PermissionNext.evaluate("task", a.name, caller.permission).action !== "deny")
+      : agents
+    description = DESCRIPTION.replace(
+      "{agents}",
+      accessibleAgents
+        .map((a) => `- ${a.name}: ${a.description ?? "This subagent should only be called manually by the user."}`)
+        .join("\n"),
+    )
+    descriptionCache.set(cacheKey, description)
+  }
   return {
     description,
     parameters,
