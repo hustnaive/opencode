@@ -1019,9 +1019,11 @@ export namespace SessionPrompt {
   }
 
   async function createUserMessage(input: PromptInput) {
-    const agent = await Agent.get(input.agent ?? (await Agent.defaultAgent()))
+    const agent =
+      (await Agent.get(input.agent ?? (await Agent.defaultAgent()))) ??
+      (await Agent.get(await Agent.defaultAgent()))
 
-    const model = input.model ?? agent.model ?? (await lastModel(input.sessionID))
+    const model = input.model ?? agent?.model ?? (await lastModel(input.sessionID))
     const full =
       !input.variant && agent.variant
         ? await Provider.getModel(model.providerID, model.modelID).catch(() => undefined)
@@ -1560,8 +1562,9 @@ NOTE: At any point in time through this workflow you should feel free to ask the
     if (session.revert) {
       await SessionRevert.cleanup(session)
     }
-    const agent = await Agent.get(input.agent)
-    const model = input.model ?? agent.model ?? (await lastModel(input.sessionID))
+    const agent =
+      (await Agent.get(input.agent)) ?? (await Agent.get(await Agent.defaultAgent()))
+    const model = input.model ?? agent?.model ?? (await lastModel(input.sessionID))
     const userMsg: MessageV2.User = {
       id: Identifier.ascending("message"),
       sessionID: input.sessionID,
