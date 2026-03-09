@@ -115,8 +115,21 @@ export interface ToastOptions {
   actions?: ToastAction[]
 }
 
+const recentToasts = new Map<string, number>()
+const TOAST_DEBOUNCE_MS = 500
+
+function toastKey(opts: ToastOptions): string {
+  return `${opts.variant ?? ""}:${opts.title ?? ""}:${opts.description ?? ""}`
+}
+
 export function showToast(options: ToastOptions | string) {
   const opts = typeof options === "string" ? { description: options } : options
+  const key = toastKey(opts)
+  const now = Date.now()
+  const last = recentToasts.get(key)
+  if (last && now - last < TOAST_DEBOUNCE_MS) return
+  recentToasts.set(key, now)
+  setTimeout(() => recentToasts.delete(key), TOAST_DEBOUNCE_MS)
   return toaster.show((props) => (
     <Toast
       toastId={props.toastId}
