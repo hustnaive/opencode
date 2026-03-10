@@ -399,6 +399,21 @@ export namespace SessionProcessor {
             } else {
               const retry = SessionRetry.retryable(error)
               if (retry !== undefined) {
+                // Clean up stale tool parts from the failed attempt
+                for (const [callID, toolPart] of Object.entries(toolcalls)) {
+                  if (toolPart.state.status !== "completed" && toolPart.state.status !== "error") {
+                    await Session.updatePart({
+                      ...toolPart,
+                      state: {
+                        ...toolPart.state,
+                        status: "error",
+                        error: retry,
+                        time: { start: Date.now(), end: Date.now() },
+                      },
+                    })
+                  }
+                  delete toolcalls[callID]
+                }
                 attempt++
                 const delay = SessionRetry.delay(attempt, error.name === "APIError" ? error : undefined)
                 SessionStatus.set(input.sessionID, {

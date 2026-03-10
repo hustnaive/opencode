@@ -68,6 +68,11 @@ export namespace SessionRetry {
       return error.data.message.includes("Overloaded") ? "Provider is overloaded" : error.data.message
     }
 
+    // Stream timeout and network errors → retryable
+    const msg = typeof error.data?.message === "string" ? error.data.message : ""
+    if (msg.includes("LLM stream inactive")) return "Stream timed out, retrying"
+    if (msg.includes("socket") && msg.includes("closed")) return "Connection lost, retrying"
+
     const json = iife(() => {
       try {
         if (typeof error.data?.message === "string") {
