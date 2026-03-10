@@ -11,6 +11,7 @@ import { SessionStatus } from "./status"
 import { Plugin } from "@/plugin"
 import type { Provider } from "@/provider/provider"
 import { LLM } from "./llm"
+import { withActivityTimeout } from "./stream-timeout"
 import { Config } from "@/config/config"
 import { SessionCompaction } from "./compaction"
 import { PermissionNext } from "@/permission/next"
@@ -18,6 +19,7 @@ import { Question } from "@/question"
 
 export namespace SessionProcessor {
   const DOOM_LOOP_THRESHOLD = 3
+  const STREAM_ACTIVITY_TIMEOUT = 120_000
   const log = Log.create({ service: "session.processor" })
 
   export type Info = Awaited<ReturnType<typeof create>>
@@ -47,12 +49,15 @@ export namespace SessionProcessor {
         needsCompaction = false
         const shouldBreak = (await Config.get()).experimental?.continue_loop_on_deny !== true
         while (true) {
+          const attemptAbort = new AbortController()
+          const chainAbort = () => attemptAbort.abort()
+          input.abort.addEventListener("abort", chainAbort, { once: true })
           try {
             let currentText: MessageV2.TextPart | undefined
             let reasoningMap: Record<string, MessageV2.ReasoningPart> = {}
-            const stream = await LLM.stream(streamInput)
+            const stream = await LLM.stream({ ...streamInput, abort: attemptAbort.signal })
 
-            for await (const value of stream.fullStream) {
+            for await (const value of withActivityTimeout(stream.fullStream, STREAM_ACTIVITY_TIMEOUT)) {
               input.abort.throwIfAborted()
               switch (value.type) {
                 case "start":
@@ -354,7 +359,10 @@ export namespace SessionProcessor {
               }
               if (needsCompaction) break
             }
+            input.abort.removeEventListener("abort", chainAbort)
           } catch (e: any) {
+            attemptAbort.abort()
+            input.abort.removeEventListener("abort", chainAbort)
             log.error("process", {
               error: e,
               stack: JSON.stringify(e.stack),
