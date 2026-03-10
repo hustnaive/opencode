@@ -57,6 +57,15 @@ export namespace SessionProcessor {
             let reasoningMap: Record<string, MessageV2.ReasoningPart> = {}
             const stream = await LLM.stream({ ...streamInput, abort: attemptAbort.signal })
 
+            // Log and suppress unhandled rejections from AI SDK background promises
+            const logAndSuppress = (err: any) => {
+              log.warn("stream background promise rejected", { error: err })
+            }
+            ;(stream as any).text?.catch?.(logAndSuppress)
+            ;(stream as any).usage?.catch?.(logAndSuppress)
+            ;(stream as any).response?.catch?.(logAndSuppress)
+            ;(stream as any).rawResponse?.catch?.(logAndSuppress)
+
             for await (const value of withActivityTimeout(stream.fullStream, STREAM_ACTIVITY_TIMEOUT)) {
               input.abort.throwIfAborted()
               switch (value.type) {
