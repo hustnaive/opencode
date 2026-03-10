@@ -12,6 +12,7 @@ import { Plugin } from "@/plugin"
 import type { Provider } from "@/provider/provider"
 import { LLM } from "./llm"
 import { withActivityTimeout } from "./stream-timeout"
+import type { TimeoutControl } from "./stream-timeout"
 import { Config } from "@/config/config"
 import { SessionCompaction } from "./compaction"
 import { PermissionNext } from "@/permission/next"
@@ -47,6 +48,7 @@ export namespace SessionProcessor {
       async process(streamInput: LLM.StreamInput) {
         log.info("process")
         needsCompaction = false
+        const timeoutControl: TimeoutControl = { paused: false }
         const shouldBreak = (await Config.get()).experimental?.continue_loop_on_deny !== true
         while (true) {
           const attemptAbort = new AbortController()
@@ -66,7 +68,7 @@ export namespace SessionProcessor {
             ;(stream as any).response?.catch?.(logAndSuppress)
             ;(stream as any).rawResponse?.catch?.(logAndSuppress)
 
-            for await (const value of withActivityTimeout(stream.fullStream, STREAM_ACTIVITY_TIMEOUT)) {
+            for await (const value of withActivityTimeout(stream.fullStream, STREAM_ACTIVITY_TIMEOUT, timeoutControl)) {
               input.abort.throwIfAborted()
               switch (value.type) {
                 case "start":
@@ -148,6 +150,10 @@ export namespace SessionProcessor {
                 case "tool-call": {
                   const match = toolcalls[value.toolCallId]
                   if (match) {
+                    // Pause timeout for tools that block on user input
+                    if (value.toolName === "question") {
+                      timeoutControl.paused = true
+                    }
                     const part = await Session.updatePart({
                       ...match,
                       tool: value.toolName,
@@ -192,6 +198,7 @@ export namespace SessionProcessor {
                   break
                 }
                 case "tool-result": {
+                  timeoutControl.paused = false
                   const match = toolcalls[value.toolCallId]
                   if (match && match.state.status === "running") {
                     await Session.updatePart({
@@ -218,6 +225,7 @@ export namespace SessionProcessor {
                 }
 
                 case "tool-error": {
+                  timeoutControl.paused = false
                   const match = toolcalls[value.toolCallId]
                   if (match && match.state.status === "running") {
                     await Session.updatePart({
