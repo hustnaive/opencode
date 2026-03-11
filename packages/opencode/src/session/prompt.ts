@@ -317,6 +317,19 @@ export namespace SessionPrompt {
     // Cache ToolRegistry.tools() results across loop iterations to avoid repeated init() calls
     const _toolRegistryCache = new Map<string, Awaited<ReturnType<typeof ToolRegistry.tools>>>()
 
+    // Cache transformed schemas across loop iterations to avoid repeated z.toJSONSchema() + ProviderTransform.schema()
+    const _schemaCache = new Map<string, any>()
+
+    // Cache MCP.tools() results across loop iterations, invalidated on tools/list_changed notification
+    let _mcpToolsCache: Awaited<ReturnType<typeof MCP.tools>> | null = null
+    const _mcpToolsUnsub = Bus.subscribe(MCP.ToolsChanged, () => {
+      _mcpToolsCache = null
+      // Clear MCP schema cache entries since tools may have changed
+      for (const key of _schemaCache.keys()) {
+        if (key.startsWith("mcp|")) _schemaCache.delete(key)
+      }
+    })
+
     while (true) {
       SessionStatus.set(sessionID, { type: "busy" })
       log.info("loop", { step, sessionID })
@@ -672,6 +685,8 @@ export namespace SessionPrompt {
         bypassAgentCheck,
         messages: msgs,
         toolRegistryCache: _toolRegistryCache,
+        schemaCache: _schemaCache,
+        mcpToolsCache: { get value() { return _mcpToolsCache }, set value(v) { _mcpToolsCache = v } },
       })
 
       // Inject StructuredOutput tool if JSON schema mode enabled
@@ -782,6 +797,7 @@ export namespace SessionPrompt {
       }
       continue
     }
+    _mcpToolsUnsub()
     SessionCompaction.prune({ sessionID })
     for await (const item of MessageV2.stream(sessionID)) {
       if (item.info.role === "user") continue
@@ -811,6 +827,8 @@ export namespace SessionPrompt {
     bypassAgentCheck: boolean
     messages: MessageV2.WithParts[]
     toolRegistryCache?: Map<string, Awaited<ReturnType<typeof ToolRegistry.tools>>>
+    schemaCache?: Map<string, any>
+    mcpToolsCache?: { value: Awaited<ReturnType<typeof MCP.tools>> | null }
   }) {
     using _ = log.time("resolveTools")
     const tools: Record<string, AITool> = {}
@@ -864,7 +882,12 @@ export namespace SessionPrompt {
     }
 
     for (const item of registryTools) {
-      const schema = ProviderTransform.schema(input.model, z.toJSONSchema(item.parameters))
+      const schemaCacheKey = `${item.id}|${input.model.providerID}|${input.model.api.id}`
+      let schema = input.schemaCache?.get(schemaCacheKey)
+      if (!schema) {
+        schema = ProviderTransform.schema(input.model, z.toJSONSchema(item.parameters))
+        input.schemaCache?.set(schemaCacheKey, schema)
+      }
       tools[item.id] = tool({
         id: item.id as any,
         description: item.description,
@@ -907,14 +930,28 @@ export namespace SessionPrompt {
       })
     }
 
-    for (const [key, item] of Object.entries(await MCP.tools())) {
+    // Use cached MCP tools if available, otherwise fetch and cache
+    let mcpTools: Awaited<ReturnType<typeof MCP.tools>>
+    if (input.mcpToolsCache && input.mcpToolsCache.value !== null) {
+      mcpTools = input.mcpToolsCache.value
+    } else {
+      mcpTools = await MCP.tools()
+      if (input.mcpToolsCache) input.mcpToolsCache.value = mcpTools
+    }
+
+    for (const [key, item] of Object.entries(mcpTools)) {
       const execute = item.execute
       if (!execute) continue
 
-      const transformed = ProviderTransform.schema(input.model, asSchema(item.inputSchema).jsonSchema)
-      item.inputSchema = jsonSchema(transformed)
-      // Wrap execute to add plugin hooks and format output
-      item.execute = async (args, opts) => {
+      const mcpSchemaCacheKey = `mcp|${key}|${input.model.providerID}|${input.model.api.id}`
+      let transformed = input.schemaCache?.get(mcpSchemaCacheKey)
+      if (!transformed) {
+        transformed = ProviderTransform.schema(input.model, asSchema(item.inputSchema).jsonSchema)
+        input.schemaCache?.set(mcpSchemaCacheKey, transformed)
+      }
+      // Create a new tool object instead of mutating the cached item
+      const wrappedTool = { ...item, inputSchema: jsonSchema(transformed) } as typeof item
+      wrappedTool.execute = async (args, opts) => {
         const ctx = context(args, opts)
 
         await Plugin.trigger(
@@ -997,7 +1034,7 @@ export namespace SessionPrompt {
           content: result.content, // directly return content to preserve ordering when outputting to model
         }
       }
-      tools[key] = item
+      tools[key] = wrappedTool
     }
 
     return tools
