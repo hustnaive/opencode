@@ -10,6 +10,7 @@ import { iife } from "@/util/iife"
 import { defer } from "@/util/defer"
 import { Config } from "../config/config"
 import { PermissionNext } from "@/permission/next"
+import { Instance } from "@/project/instance"
 
 // Cache TaskTool description per caller agent to avoid repeated Agent.list() + PermissionNext.evaluate() on every resolveTools call
 const descriptionCache = new Map<string, string>()
@@ -28,7 +29,7 @@ const parameters = z.object({
 })
 
 export const TaskTool = Tool.define("task", async (ctx) => {
-  const cacheKey = ctx?.agent?.name ?? "__no_agent__"
+  const cacheKey = `${Instance.directory}|${ctx?.agent?.name ?? "__no_agent__"}`
   let description = descriptionCache.get(cacheKey)
   if (!description) {
     const agents = await Agent.list().then((x) => x.filter((a) => a.mode !== "primary"))
