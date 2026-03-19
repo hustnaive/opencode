@@ -415,7 +415,7 @@ export namespace SessionProcessor {
               })
             } else {
               const retry = SessionRetry.retryable(error)
-              if (retry !== undefined) {
+              if (retry !== undefined && attempt < SessionRetry.RETRY_MAX_ATTEMPTS) {
                 // Clean up stale tool parts from the failed attempt
                 for (const [callID, toolPart] of Object.entries(toolcalls)) {
                   if (toolPart.state.status !== "completed" && toolPart.state.status !== "error") {
