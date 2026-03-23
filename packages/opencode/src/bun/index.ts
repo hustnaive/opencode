@@ -13,13 +13,18 @@ import { Process } from "../util/process"
 export namespace BunProc {
   const log = Log.create({ service: "bun" })
 
+  const DEFAULT_TIMEOUT_MS = 30_000
+
   export async function run(cmd: string[], options?: Process.Options) {
     log.info("running", {
       cmd: [which(), ...cmd],
       ...options,
     })
+    const abort = new AbortController()
+    const timer = setTimeout(() => abort.abort(), options?.abort ? Infinity : DEFAULT_TIMEOUT_MS)
     const result = Process.spawn([which(), ...cmd], {
       ...options,
+      abort: options?.abort ?? abort.signal,
       stdout: "pipe",
       stderr: "pipe",
       env: {
@@ -28,18 +33,22 @@ export namespace BunProc {
         BUN_BE_BUN: "1",
       },
     })
-    const code = await result.exited
-    const stdout = result.stdout ? await text(result.stdout) : undefined
-    const stderr = result.stderr ? await text(result.stderr) : undefined
-    log.info("done", {
-      code,
-      stdout,
-      stderr,
-    })
-    if (code !== 0) {
-      throw new Error(`Command failed with exit code ${code}`)
+    try {
+      const code = await result.exited
+      const stdout = result.stdout ? await text(result.stdout) : undefined
+      const stderr = result.stderr ? await text(result.stderr) : undefined
+      log.info("done", {
+        code,
+        stdout,
+        stderr,
+      })
+      if (code !== 0) {
+        throw new Error(`Command failed with exit code ${code}`)
+      }
+      return result
+    } finally {
+      clearTimeout(timer)
     }
-    return result
   }
 
   export function which() {
