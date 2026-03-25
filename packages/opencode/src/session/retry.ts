@@ -9,6 +9,18 @@ export namespace SessionRetry {
   export const RETRY_MAX_DELAY = 2_147_483_647 // max 32-bit signed integer for setTimeout
   export const RETRY_MAX_ATTEMPTS = 3
 
+  // Stream timeout specific: longer backoff, more attempts before giving up
+  export const STREAM_TIMEOUT_MAX_ATTEMPTS = 5
+  export const STREAM_TIMEOUT_INITIAL_DELAY = 10_000 // 10 seconds
+  export const STREAM_TIMEOUT_MAX_DELAY = 80_000 // 80 seconds
+
+  export function streamTimeoutDelay(attempt: number): number {
+    return Math.min(
+      STREAM_TIMEOUT_INITIAL_DELAY * Math.pow(RETRY_BACKOFF_FACTOR, attempt - 1),
+      STREAM_TIMEOUT_MAX_DELAY,
+    )
+  }
+
   export async function sleep(ms: number, signal: AbortSignal): Promise<void> {
     return new Promise((resolve, reject) => {
       const abortHandler = () => {

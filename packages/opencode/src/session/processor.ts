@@ -11,7 +11,7 @@ import { SessionStatus } from "./status"
 import { Plugin } from "@/plugin"
 import type { Provider } from "@/provider/provider"
 import { LLM } from "./llm"
-import { withActivityTimeout } from "./stream-timeout"
+import { StreamTimeoutError, withActivityTimeout } from "./stream-timeout"
 import type { TimeoutControl } from "./stream-timeout"
 import { Config } from "@/config/config"
 import { SessionCompaction } from "./compaction"
@@ -20,7 +20,7 @@ import { Question } from "@/question"
 
 export namespace SessionProcessor {
   const DOOM_LOOP_THRESHOLD = 3
-  const STREAM_ACTIVITY_TIMEOUT = 120_000
+  const STREAM_ACTIVITY_TIMEOUT = 600_000 // 10 minutes
   const log = Log.create({ service: "session.processor" })
 
   export type Info = Awaited<ReturnType<typeof create>>
@@ -36,6 +36,7 @@ export namespace SessionProcessor {
     let snapshot: string | undefined
     let blocked = false
     let attempt = 0
+    let streamTimeoutCount = 0
     let needsCompaction = false
 
     const result = {
@@ -376,6 +377,8 @@ export namespace SessionProcessor {
               }
               if (needsCompaction) break
             }
+            // Stream completed successfully — reset timeout counter
+            streamTimeoutCount = 0
             input.abort.removeEventListener("abort", chainAbort)
           } catch (e: any) {
             attemptAbort.abort()
@@ -413,6 +416,57 @@ export namespace SessionProcessor {
                 sessionID: input.sessionID,
                 error,
               })
+            } else if (e instanceof StreamTimeoutError) {
+              // Stream timeout: use dedicated exponential backoff with circuit breaker
+              streamTimeoutCount++
+              const maxAttempts = SessionRetry.STREAM_TIMEOUT_MAX_ATTEMPTS
+              if (streamTimeoutCount < maxAttempts) {
+                // Clean up stale tool parts
+                for (const [callID, toolPart] of Object.entries(toolcalls)) {
+                  if (toolPart.state.status !== "completed" && toolPart.state.status !== "error") {
+                    await Session.updatePart({
+                      ...toolPart,
+                      state: {
+                        ...toolPart.state,
+                        status: "error",
+                        error: "Stream timed out, retrying",
+                        time: { start: Date.now(), end: Date.now() },
+                      },
+                    })
+                  }
+                  delete toolcalls[callID]
+                }
+                const delay = SessionRetry.streamTimeoutDelay(streamTimeoutCount)
+                log.info("stream timeout backoff", {
+                  attempt: streamTimeoutCount,
+                  maxAttempts,
+                  delayMs: delay,
+                })
+                SessionStatus.set(input.sessionID, {
+                  type: "retry",
+                  attempt: streamTimeoutCount,
+                  message: `Stream timed out (${streamTimeoutCount}/${maxAttempts}), retrying in ${Math.round(delay / 1000)}s`,
+                  next: Date.now() + delay,
+                })
+                await SessionRetry.sleep(delay, input.abort).catch(() => {})
+                continue
+              }
+              // Circuit breaker: exceeded max stream timeout attempts
+              log.error("stream timeout circuit breaker", {
+                attempts: streamTimeoutCount,
+                sessionID: input.sessionID,
+              })
+              input.assistantMessage.error = error
+              Bus.publish(Session.Event.Error, {
+                sessionID: input.assistantMessage.sessionID,
+                error: input.assistantMessage.error,
+              })
+              // Publish dedicated event for stream timeout exhaustion (picked up by notification plugin)
+              Bus.publish("session.stream_timeout_exhausted" as any, {
+                sessionID: input.sessionID,
+                attempts: streamTimeoutCount,
+              })
+              SessionStatus.set(input.sessionID, { type: "idle" })
             } else {
               const retry = SessionRetry.retryable(error)
               if (retry !== undefined && attempt < SessionRetry.RETRY_MAX_ATTEMPTS) {
@@ -431,6 +485,8 @@ export namespace SessionProcessor {
                   }
                   delete toolcalls[callID]
                 }
+                // Reset stream timeout counter on non-timeout retry
+                streamTimeoutCount = 0
                 attempt++
                 const delay = SessionRetry.delay(attempt, error.name === "APIError" ? error : undefined)
                 SessionStatus.set(input.sessionID, {
